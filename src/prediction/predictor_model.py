@@ -122,6 +122,10 @@ class TimeStepClassifier:
         for i, estimator in enumerate(self.model.estimators_):
             y_decision = estimator.decision_function(X)
             preds[i, :, :] = helper(y_decision)
+            
+
+        preds = np.array(preds)
+        preds = preds.transpose(1, 0, 2)
 
         prob_dict = {}
 
@@ -139,7 +143,7 @@ class TimeStepClassifier:
         }
 
         sorted_dict = {key: prob_dict[key] for key in sorted(prob_dict.keys())}
-        probabilities = np.vstack(sorted_dict.values())
+        probabilities = np.vstack(list(sorted_dict.values()))
         return probabilities
 
     def evaluate(self, test_data):
