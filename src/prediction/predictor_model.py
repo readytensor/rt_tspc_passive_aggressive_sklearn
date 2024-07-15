@@ -1,6 +1,5 @@
 import os
 import warnings
-
 import joblib
 import numpy as np
 from sklearn.linear_model import PassiveAggressiveClassifier
@@ -8,9 +7,8 @@ from sklearn.multioutput import MultiOutputClassifier
 from sklearn.exceptions import NotFittedError
 from multiprocessing import cpu_count
 from sklearn.metrics import f1_score
-from schema.data_schema import TSAnnotationSchema
-from preprocessing.custom_transformers import PADDING_VALUE
-from typing import Optional, Tuple
+from schema.data_schema import TimeStepClassificationSchema
+from typing import Tuple
 
 warnings.filterwarnings("ignore")
 PREDICTOR_FILE_NAME = "predictor.joblib"
@@ -27,34 +25,40 @@ def softmax(x):
     e_x = np.exp(x - np.max(x, axis=1, keepdims=True))
     return e_x / e_x.sum(axis=1, keepdims=True)
 
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
-class TSAnnotator:
-    """Passive Aggressive Timeseries Annotator.
+
+class TimeStepClassifier:
+    """Passive Aggressive TimeStepClassifier.
 
     This class provides a consistent interface that can be used with other
-    TSAnnotator models.
+    TimeStepClassifier models.
     """
-    MODEL_NAME = "Passive_Aggressive_Timeseries_Annotator"
+    MODEL_NAME = "Passive_Aggressive_TimeStepClassifier"
 
     def __init__(
         self,
-        data_schema: TSAnnotationSchema,
+        data_schema: TimeStepClassificationSchema,
         encode_len: int,
+        padding_value: float,
         C: float = 1.0,
 
         **kwargs,
     ):
         """
-        Construct a new Passive Aggressive TSAnnotator.
+        Construct a new Passive Aggressive TimeStepClassifier.
 
         Args:
-            data_schema (TSAnnotationSchema): The data schema.
+            data_schema (TimeStepClassificationSchema): The data schema.
             encode_len (int): Encoding (history) length.
+            padding_value (float): Padding value.
             var_smoothing (float): Portion of the largest variance of all features added to variances for calculation stability.
             **kwargs: Additional keyword arguments.
         """
         self.data_schema = data_schema
         self.encode_len = int(encode_len)
+        self.padding_value = padding_value
         self.C = float(C)
         self.kwargs = kwargs
         self.model = self.build_model()
@@ -109,15 +113,15 @@ class TSAnnotator:
         X, window_ids = self._get_X_and_y(data, is_train=False)
         preds = np.zeros((window_ids.shape[1], X.shape[0], len(
             self.data_schema.target_classes)))
+        # helper function to convert decision function to probabilities
+        # handle binary and multiclass classification
+        if preds.shape[2] == 2:
+            helper = lambda x: np.column_stack((1 - (sigmoid_val := sigmoid(x)), sigmoid_val))
+        else:
+            helper = softmax
         for i, estimator in enumerate(self.model.estimators_):
             y_decision = estimator.decision_function(X)
-            preds[i, :, :] = softmax(y_decision)
-        # preds = self.model.predict_proba(X)
-        # for i in range(len(preds)):
-        #     if preds[i].shape[0] > len(self.data_schema.target_classes):
-        #         preds[i] = preds[i][:-1]
-        preds = np.array(preds)
-        preds = preds.transpose(1, 0, 2)
+            preds[i, :, :] = helper(y_decision)
 
         prob_dict = {}
 
@@ -131,7 +135,7 @@ class TSAnnotator:
         prob_dict = {
             k: np.mean(np.array(v), axis=0)
             for k, v in prob_dict.items()
-            if k[1] != PADDING_VALUE
+            if k[1] != self.padding_value
         }
 
         sorted_dict = {key: prob_dict[key] for key in sorted(prob_dict.keys())}
@@ -150,7 +154,7 @@ class TSAnnotator:
         raise NotFittedError("Model is not fitted yet.")
 
     def save(self, model_dir_path: str) -> None:
-        """Save the Passive Aggressive TSAnnotator to disk.
+        """Save the Passive Aggressive TimeStepClassifier to disk.
 
         Args:
             model_dir_path (str): Dir path to which to save the model.
@@ -160,13 +164,13 @@ class TSAnnotator:
         joblib.dump(self, os.path.join(model_dir_path, PREDICTOR_FILE_NAME))
 
     @classmethod
-    def load(cls, model_dir_path: str) -> "TSAnnotator":
-        """Load the Passive Aggressive TSAnnotator from disk.
+    def load(cls, model_dir_path: str) -> "TimeStepClassifier":
+        """Load the Passive Aggressive TimeStepClassifier from disk.
 
         Args:
             model_dir_path (str): Dir path to the saved model.
         Returns:
-            TSAnnotator: A new instance of the loaded Passive Aggressive TSAnnotator.
+            TimeStepClassifier: A new instance of the loaded Passive Aggressive TimeStepClassifier.
         """
         model = joblib.load(os.path.join(model_dir_path, PREDICTOR_FILE_NAME))
         return model
@@ -174,47 +178,51 @@ class TSAnnotator:
 
 def train_predictor_model(
     train_data: np.ndarray,
-    data_schema: TSAnnotationSchema,
+    data_schema: TimeStepClassificationSchema,
     hyperparameters: dict,
-) -> TSAnnotator:
+    padding_value: float,
+) -> TimeStepClassifier:
     """
-    Instantiate and train the TSAnnotator model.
+    Instantiate and train the TimeStepClassifier model.
 
     Args:
         train_data (np.ndarray): The train split from training data.
-        hyperparameters (dict): Hyperparameters for the TSAnnotator.
+        data_schema (TimeStepClassificationSchema): The data schema.
+        hyperparameters (dict): Hyperparameters for the TimeStepClassifier.
+        padding_value (float): The padding value.
 
     Returns:
-        'TSAnnotator': The TSAnnotator model
+        'TimeStepClassifier': The TimeStepClassifier model
     """
-    model = TSAnnotator(
+    model = TimeStepClassifier(
         data_schema=data_schema,
+        padding_value=padding_value,
         **hyperparameters,
     )
     model.fit(train_data=train_data)
     return model
 
 
-def predict_with_model(model: TSAnnotator, test_data: np.ndarray) -> np.ndarray:
+def predict_with_model(model: TimeStepClassifier, test_data: np.ndarray) -> np.ndarray:
     """
     Make forecast.
 
     Args:
-        model (TSAnnotator): The TSAnnotator model.
-        test_data (np.ndarray): The test input data for annotation.
+        model (TimeStepClassifier): The TimeStepClassifier model.
+        test_data (np.ndarray): The test input data for TSpC.
 
     Returns:
-        np.ndarray: The annotated data.
+        np.ndarray: The classified steps.
     """
     return model.predict(test_data)
 
 
-def save_predictor_model(model: TSAnnotator, predictor_dir_path: str) -> None:
+def save_predictor_model(model: TimeStepClassifier, predictor_dir_path: str) -> None:
     """
-    Save the TSAnnotator model to disk.
+    Save the TimeStepClassifier model to disk.
 
     Args:
-        model (TSAnnotator): The TSAnnotator model to save.
+        model (TimeStepClassifier): The TimeStepClassifier model to save.
         predictor_dir_path (str): Dir path to which to save the model.
     """
     if not os.path.exists(predictor_dir_path):
@@ -222,28 +230,28 @@ def save_predictor_model(model: TSAnnotator, predictor_dir_path: str) -> None:
     model.save(predictor_dir_path)
 
 
-def load_predictor_model(predictor_dir_path: str) -> TSAnnotator:
+def load_predictor_model(predictor_dir_path: str) -> TimeStepClassifier:
     """
-    Load the TSAnnotator model from disk.
+    Load the TimeStepClassifier model from disk.
 
     Args:
         predictor_dir_path (str): Dir path where model is saved.
 
     Returns:
-        TSAnnotator: A new instance of the loaded TSAnnotator model.
+        TimeStepClassifier: A new instance of the loaded TimeStepClassifier model.
     """
-    return TSAnnotator.load(predictor_dir_path)
+    return TimeStepClassifier.load(predictor_dir_path)
 
 
-def evaluate_predictor_model(model: TSAnnotator, test_split: np.ndarray) -> float:
+def evaluate_predictor_model(model: TimeStepClassifier, test_split: np.ndarray) -> float:
     """
-    Evaluate the TSAnnotator model and return the r-squared value.
+    Evaluate the TimeStepClassifier model and return the r-squared value.
 
     Args:
-        model (TSAnnotator): The TSAnnotator model.
+        model (TimeStepClassifier): The TimeStepClassifier model.
         test_split (np.ndarray): Test data.
 
     Returns:
-        float: The r-squared value of the TSAnnotator model.
+        float: The r-squared value of the TimeStepClassifier model.
     """
     return model.evaluate(test_split)
